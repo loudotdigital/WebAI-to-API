@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 try:
     import tomli
 except ImportError:
-    # For Python 3.11+, tomllib is in the standard library
     try:
         import tomllib as tomli
     except ImportError:
@@ -31,13 +30,14 @@ from app.services.gemini_client import init_gemini_client
 
 # Conditionally import g4f runner function
 try:
-    from g4f.api import run_api as run_g4f_api
+    # We will use create_app from g4f instead of run_api to add middleware
+    from g4f.api import create_app
     G4F_AVAILABLE = True
 except ImportError:
     G4F_AVAILABLE = False
 
-# --- NEW: FastAPI imports for the controller ---
-from fastapi import FastAPI
+# --- FastAPI and Security imports for the controller and auth ---
+from fastapi import FastAPI, Request, HTTPException, status, Depends
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -73,14 +73,12 @@ def get_app_info() -> Tuple[str, str]:
 def start_webai_server(
     host: str, port: int, reload: bool, stop_event: "MultiprocessingEvent"
 ):
-    """Starts the WebAI Uvicorn server with a graceful shutdown mechanism."""
+    """Starts the WebAI Uvicorn server. Auth is handled in app.main."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    config = uvicorn.Config(
-        webai_app, host=host, port=port, reload=reload, log_config=None
-    )
+    config = uvicorn.Config(webai_app, host=host, port=port, reload=reload, log_config=None)
     server = uvicorn.Server(config)
 
     def shutdown_monitor():
@@ -96,10 +94,24 @@ def start_webai_server(
 
 
 def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
-    """Starts the G4F server with a graceful shutdown mechanism."""
+    """Starts the G4F server and wraps it with Bearer Token auth."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # --- Bearer Token Authentication Logic for g4f ---
+    API_KEY = os.getenv("API_KEY", "default-key-please-change")
+    BEARER_TOKEN = f"Bearer {API_KEY}"
+
+    async def verify_g4f_bearer_token(request: Request):
+        if request.url.path in ["/docs", "/redoc", "/openapi.json", "/"]:
+            return
+        auth_header = request.headers.get("Authorization")
+        if auth_header != BEARER_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid Bearer Token")
+
+    g4f_app = create_app(dependencies=[Depends(verify_g4f_bearer_token)])
+    # --- END of g4f Authentication Logic ---
 
     def shutdown_monitor():
         stop_event.wait()
@@ -110,7 +122,7 @@ def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
     monitor_thread.start()
 
     print_server_info(host, port, "g4f")
-    run_g4f_api(host=host, port=port, proxy=None)
+    uvicorn.run(g4f_app, host=host, port=port, log_level="info")
 
 
 # --- Helper Function for Printing Info ---
@@ -127,7 +139,7 @@ def print_server_info(host: str, port: int, mode: str):
     elif mode == "g4f":
         print("🚀 gpt4free Server is RUNNING 🚀".center(80))
     print("=" * 80)
-    print(f"INFO: API Server available at: {base_url}")
+    print(f"INFO: API Server available at: {base_url} (Protected with Bearer Token)")
     print("=" * 80)
 
 
@@ -175,23 +187,20 @@ if __name__ == "__main__":
             return {"status": "switching", "mode": mode}
         return {"status": "error", "message": "Invalid mode"}
 
-    # Function to run the controller app in a separate process
     def run_controller(host: str, port: int):
         print("--- Starting Controller UI Server ---")
         uvicorn.run(controller_app, host=host, port=port, log_level="warning")
 
-    # Start the Controller Server in a separate daemon process
     controller_process = multiprocessing.Process(
         target=run_controller, args=(args.host, args.controller_port)
     )
     controller_process.daemon = True
     controller_process.start()
-    time.sleep(2) # Give the controller a moment to start
+    time.sleep(2)
     print("\n" + "=" * 80)
     print(f"🚀 {Colors.BOLD}{Colors.MAGENTA}CONTROLLER UI is running at http://{args.host}:{args.controller_port}/controller{Colors.RESET}")
     print("=" * 80 + "\n")
 
-    # --- Check availability and update shared state ---
     print("INFO:     Checking availability of server modes...")
     shared_state["webai_available"] = asyncio.run(init_gemini_client())
     shared_state["g4f_available"] = G4F_AVAILABLE
@@ -205,14 +214,12 @@ if __name__ == "__main__":
     else:
         print(f"WARN:     ⚠️ {Colors.YELLOW}gpt4free mode is not available.{Colors.RESET}")
 
-    # --- Set initial mode ---
     initial_mode = "webai" if shared_state["webai_available"] else "g4f" if shared_state["g4f_available"] else None
     if not initial_mode:
         print("\nERROR:    No server modes are available to run. Exiting.")
         controller_process.terminate()
         sys.exit(1)
 
-    # --- Main Server-Switching Loop ---
     current_process = None
     stop_event = None
 
@@ -220,7 +227,6 @@ if __name__ == "__main__":
         while True:
             requested = shared_state["requested_mode"]
             if not current_process or (requested and requested != shared_state["current_mode"]):
-
                 if current_process and current_process.is_alive():
                     print(f"\n[Controller] Gracefully stopping server ('{shared_state['current_mode']}')...")
                     if stop_event:
@@ -230,10 +236,9 @@ if __name__ == "__main__":
                         print("[Controller] Process did not stop in time, terminating.")
                         current_process.terminate()
 
-                # Update the state
                 current_mode = requested or initial_mode
                 shared_state["current_mode"] = current_mode
-                shared_state["requested_mode"] = None  # Reset the request
+                shared_state["requested_mode"] = None
 
                 print(f"\n[Controller] Starting server in '{current_mode}' mode on port {args.port}...")
                 stop_event = multiprocessing.Event()
@@ -247,26 +252,22 @@ if __name__ == "__main__":
 
                 current_process = multiprocessing.Process(target=target_func, args=process_args)
                 current_process.start()
-
+            
             time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n[Controller] Ctrl+C detected. Initiating final shutdown...")
 
     finally:
-        # Final cleanup
         if stop_event and not stop_event.is_set():
             stop_event.set()
-
         if current_process and current_process.is_alive():
             print("[Controller] Waiting for final AI server process to shut down...")
             current_process.join(timeout=5)
             if current_process.is_alive():
                 current_process.terminate()
-        
         if controller_process and controller_process.is_alive():
             print("[Controller] Shutting down controller UI process...")
             controller_process.terminate()
-
         print("[Controller] Shutdown complete. Forcing exit.")
         os._exit(0)
