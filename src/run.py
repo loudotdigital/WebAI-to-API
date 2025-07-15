@@ -1,4 +1,4 @@
-# src/run.py
+# src/run.py (Corrected version using middleware for g4f)
 import argparse
 import asyncio
 import multiprocessing
@@ -30,7 +30,6 @@ from app.services.gemini_client import init_gemini_client
 
 # Conditionally import g4f runner function
 try:
-    # We will use create_app from g4f instead of run_api to add middleware
     from g4f.api import create_app
     G4F_AVAILABLE = True
 except ImportError:
@@ -94,24 +93,35 @@ def start_webai_server(
 
 
 def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
-    """Starts the G4F server and wraps it with Bearer Token auth."""
+    """Starts the G4F server and wraps it with Bearer Token auth middleware."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # --- Bearer Token Authentication Logic for g4f ---
+    # --- CORRECTED: Bearer Token Authentication Logic using Middleware ---
     API_KEY = os.getenv("API_KEY", "default-key-please-change")
     BEARER_TOKEN = f"Bearer {API_KEY}"
 
-    async def verify_g4f_bearer_token(request: Request):
+    # Get the original g4f application
+    g4f_app = create_app()
+
+    @g4f_app.middleware("http")
+    async def verify_g4f_bearer_token(request: Request, call_next):
+        # Allow access to documentation and the root health check without a key
         if request.url.path in ["/docs", "/redoc", "/openapi.json", "/"]:
-            return
+            return await call_next(request)
+
         auth_header = request.headers.get("Authorization")
         if auth_header != BEARER_TOKEN:
-            raise HTTPException(status_code=401, detail="Invalid Bearer Token")
-
-    g4f_app = create_app(dependencies=[Depends(verify_g4f_bearer_token)])
-    # --- END of g4f Authentication Logic ---
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing Bearer Token",
+            )
+        
+        # If the token is valid, proceed with the request
+        response = await call_next(request)
+        return response
+    # --- END of corrected logic ---
 
     def shutdown_monitor():
         stop_event.wait()
