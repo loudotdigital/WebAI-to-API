@@ -30,19 +30,21 @@ from app.config import load_config
 from app.main import app as webai_app
 from app.services.gemini_client import init_gemini_client
 
-# Conditionally import g4f runner function
+# --- FastAPI imports for the controller and security ---
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+import uvicorn
+from dotenv import load_dotenv
+
+# Conditionally check if g4f is available without breaking the script
 try:
-    from g4f.api import run_api as run_g4f_api
+    # This is a safe way to check without causing an error on failure
+    import g4f.api
     G4F_AVAILABLE = True
 except ImportError:
     G4F_AVAILABLE = False
-
-# --- FastAPI imports for the controller and security ---
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse
-import uvicorn
-from dotenv import load_dotenv
 
 
 # Helper class for terminal colors
@@ -81,6 +83,12 @@ def start_webai_server(
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+    # Check if the WebAI server will be protected
+    if os.getenv("API_KEY"):
+        print("INFO:     WebAI server is PROTECTED with an API Key.")
+    else:
+        print("WARN:     WebAI server is UNPROTECTED. Set API_KEY in .env file.")
+
     config = uvicorn.Config(
         webai_app, host=host, port=port, reload=reload, log_config=None
     )
@@ -98,11 +106,60 @@ def start_webai_server(
     print(f"\n[WebAI Server] Process exited gracefully.")
 
 
-def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
-    """Starts the G4F server with a graceful shutdown mechanism."""
+def start_g4f_server_protected(host: str, port: int, stop_event: "MultiprocessingEvent"):
+    """
+    Loads the g4f app using its factory, wraps it in our security middleware, and then runs it.
+    """
+    # This import must be inside the function.
+    # We import the FACTORY function, not an app object.
+    from g4f.api import create_app
+
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
+    # Call the factory to get the actual FastAPI app instance
+    g4f_app = create_app()
+
+    # --- Security Middleware for G4F ---
+    class ApiKeyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            api_key = os.getenv("API_KEY")
+            # If no API key is configured on the server, block all requests
+            if not api_key:
+                return JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={"detail": "API Key not configured on the server"},
+                )
+
+            auth_header = request.headers.get("Authorization")
+            if not auth_header:
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Authorization header missing"},
+                )
+
+            try:
+                scheme, token = auth_header.split()
+                if scheme.lower() != "bearer" or token != api_key:
+                    raise ValueError
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Invalid or malformed API Key"},
+                )
+            
+            # If the key is valid, proceed with the request
+            response = await call_next(request)
+            return response
+
+    # Add our security middleware to the g4f app object
+    g4f_app.add_middleware(ApiKeyMiddleware)
+
+    if os.getenv("API_KEY"):
+        print("INFO:     g4f server is PROTECTED with a master API Key.")
+    else:
+        print("WARN:     g4f server is UNPROTECTED. Set API_KEY in .env file.")
 
     def shutdown_monitor():
         stop_event.wait()
@@ -113,7 +170,8 @@ def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
     monitor_thread.start()
 
     print_server_info(host, port, "g4f")
-    run_g4f_api(host=host, port=port, proxy=None)
+    # Run the modified g4f_app with uvicorn
+    uvicorn.run(g4f_app, host=host, port=port, log_level="info")
 
 
 # --- Helper Function for Printing Info ---
@@ -275,9 +333,9 @@ if __name__ == "__main__":
                 if current_mode == "webai":
                     process_args = (args.host, args.port, args.reload, stop_event)
                     target_func = start_webai_server
-                else:
+                else: # current_mode == 'g4f'
                     process_args = (args.host, args.port, stop_event)
-                    target_func = start_g4f_server
+                    target_func = start_g4f_server_protected 
 
                 current_process = multiprocessing.Process(target=target_func, args=process_args)
                 current_process.start()
