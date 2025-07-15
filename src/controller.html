@@ -5,68 +5,24 @@
     <title>Server Controller</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f4f9; }
-        .controller { text-align: center; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); min-width: 350px; }
-        h1 { margin-top: 0; color: #333; }
-        .mode { border: 1px solid #ddd; padding: 1rem; margin-top: 1rem; border-radius: 5px; transition: all 0.3s ease; }
+        .controller { text-align: center; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { margin-top: 0; }
+        .mode { border: 1px solid #ddd; padding: 1rem; margin-top: 1rem; border-radius: 5px; }
         .running { border-color: #28a745; background-color: #e9f7ea; }
-        .running h3 { color: #155724; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 10px; transition: background-color 0.2s; }
-        button:hover:not(:disabled) { background-color: #0056b3; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 10px; }
+        button:hover { background-color: #0056b3; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
     </style>
 </head>
 <body>
     <div class="controller">
         <h1>Server Mode Controller</h1>
-        <div id="status-container"><p>Loading status...</p></div>
+        <div id="status-container"><p>Loading...</p></div>
     </div>
 
     <script>
         const container = document.getElementById('status-container');
 
-        // This function calls the API to switch the server
-        async function switchServer(mode) {
-            container.innerHTML = `<p>Switching to ${mode} mode...</p>`;
-            // Here is the API call that the button triggers
-            await fetch(`/switch/${mode}`, { method: 'POST' });
-            // Wait 2 seconds for the server to restart, then refresh the status
-            setTimeout(fetchStatus, 2000); 
-        }
-
-        // This function renders the buttons based on the server status
-        function render(data) {
-            let html = '';
-            
-            // --- WebAI Server Control Box ---
-            html += `
-                <div class="mode ${data.current_mode === 'webai' ? 'running' : ''}">
-                    <h3>WebAI Server (Gemini)</h3>
-                    <p>Status: <strong>${data.current_mode === 'webai' ? 'RUNNING' : 'STOPPED'}</strong></p>
-                    
-                    <!-- This button is only enabled if WebAI is available and NOT currently running -->
-                    <button onclick="switchServer('webai')" ${data.current_mode === 'webai' || !data.webai_available ? 'disabled' : ''}>
-                        Activate WebAI
-                    </button>
-                </div>
-            `;
-            
-            // --- g4f Server Control Box ---
-            html += `
-                <div class="mode ${data.current_mode === 'g4f' ? 'running' : ''}">
-                    <h3>g4f Server (Fallback)</h3>
-                    <p>Status: <strong>${data.current_mode === 'g4f' ? 'RUNNING' : 'STOPPED'}</strong></p>
-
-                    <!-- This button is only enabled if g4f is available and NOT currently running -->
-                    <button onclick="switchServer('g4f')" ${data.current_mode === 'g4f' || !data.g4f_available ? 'disabled' : ''}>
-                        Activate g4f
-                    </button>
-                </div>
-            `;
-            
-            container.innerHTML = html;
-        }
-
-        // This function gets the latest status from the controller
         async function fetchStatus() {
             try {
                 const response = await fetch('/status');
@@ -77,7 +33,40 @@
             }
         }
 
-        // Fetch status as soon as the page loads
+        async function switchServer(mode) {
+            container.innerHTML = `<p>Switching to ${mode} mode...</p>`;
+            await fetch(`/switch/${mode}`, { method: 'POST' });
+            setTimeout(fetchStatus, 2000); // Wait 2s for server to restart, then refresh
+        }
+
+        function render(data) {
+            let html = '';
+            
+            // WebAI Server
+            html += `
+                <div class="mode ${data.current_mode === 'webai' ? 'running' : ''}">
+                    <h3>WebAI Server (Gemini)</h3>
+                    <p>Status: <strong>${data.current_mode === 'webai' ? 'RUNNING' : 'STOPPED'}</strong></p>
+                    <button onclick="switchServer('webai')" ${data.current_mode === 'webai' || !data.webai_available ? 'disabled' : ''}>
+                        Activate WebAI
+                    </button>
+                </div>
+            `;
+            
+            // g4f Server
+            html += `
+                <div class="mode ${data.current_mode === 'g4f' ? 'running' : ''}">
+                    <h3>g4f Server (Fallback)</h3>
+                    <p>Status: <strong>${data.current_mode === 'g4f' ? 'RUNNING' : 'STOPPED'}</strong></p>
+                    <button onclick="switchServer('g4f')" ${data.current_mode === 'g4f' || !data.g4f_available ? 'disabled' : ''}>
+                        Activate g4f
+                    </button>
+                </div>
+            `;
+            
+            container.innerHTML = html;
+        }
+
         document.addEventListener('DOMContentLoaded', fetchStatus);
     </script>
 </body>
