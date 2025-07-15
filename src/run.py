@@ -8,6 +8,7 @@ import threading
 import os
 import signal
 from typing import Dict, Tuple
+import secrets  # For secure password comparison
 
 # This block is only processed by type checkers like Pylance
 from typing import TYPE_CHECKING
@@ -36,8 +37,9 @@ try:
 except ImportError:
     G4F_AVAILABLE = False
 
-# --- NEW: FastAPI imports for the controller ---
-from fastapi import FastAPI
+# --- FastAPI imports for the controller and security ---
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 import uvicorn
 from dotenv import load_dotenv
@@ -133,14 +135,42 @@ def print_server_info(host: str, port: int, mode: str):
 
 
 # --- Controller App Factory & Runner ---
+
+# Create the security object for HTTP Basic Auth
+security = HTTPBasic()
+
+def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)):
+    """
+    Checks user credentials against environment variables.
+    Uses secrets.compare_digest to prevent timing attacks.
+    """
+    correct_username = os.getenv("CONTROLLER_USERNAME")
+    correct_password = os.getenv("CONTROLLER_PASSWORD")
+
+    if not correct_username or not correct_password:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Controller credentials are not configured on the server."
+        )
+
+    is_correct_username = secrets.compare_digest(credentials.username, correct_username)
+    is_correct_password = secrets.compare_digest(credentials.password, correct_password)
+
+    if not (is_correct_username and is_correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 def create_controller_app(shared_state: Dict):
-    """Creates the FastAPI controller app, injecting the shared state."""
-    controller_app = FastAPI()
+    """Creates the FastAPI controller app, injecting shared state and security."""
+    controller_app = FastAPI(dependencies=[Depends(authenticate_user)])
 
     @controller_app.get("/controller", response_class=HTMLResponse)
     async def get_controller_page():
         try:
-            # FIX: Ensure the path is relative to the project root
             with open("src/controller.html", "r", encoding="utf-8") as f:
                 return HTMLResponse(content=f.read())
         except FileNotFoundError:
@@ -162,7 +192,6 @@ def create_controller_app(shared_state: Dict):
 
 def run_controller(host: str, port: int, shared_state: Dict):
     """Runs the controller app in a separate process."""
-    # This function is now at the top level, so it can be pickled.
     controller_app = create_controller_app(shared_state)
     print("--- Starting Controller UI Server ---")
     uvicorn.run(controller_app, host=host, port=port, log_level="warning")
@@ -190,18 +219,17 @@ if __name__ == "__main__":
     parser.add_argument("--reload", action="store_true", help="Enable auto-reloading for WebAI mode")
     args = parser.parse_args()
 
-    # Start the Controller Server in a separate daemon process
     controller_process = multiprocessing.Process(
         target=run_controller, args=(args.host, args.controller_port, shared_state)
     )
     controller_process.daemon = True
     controller_process.start()
-    time.sleep(2) # Give the controller a moment to start
+    time.sleep(2)
     print("\n" + "=" * 80)
     print(f"🚀 {Colors.BOLD}{Colors.MAGENTA}CONTROLLER UI is running at http://{args.host}:{args.controller_port}/controller{Colors.RESET}")
+    print(f"🔒 {Colors.BOLD}{Colors.YELLOW}Controller UI is password protected.{Colors.RESET}")
     print("=" * 80 + "\n")
 
-    # --- Check availability and update shared state ---
     print("INFO:     Checking availability of server modes...")
     shared_state["webai_available"] = asyncio.run(init_gemini_client())
     shared_state["g4f_available"] = G4F_AVAILABLE
@@ -215,14 +243,12 @@ if __name__ == "__main__":
     else:
         print(f"WARN:     ⚠️ {Colors.YELLOW}gpt4free mode is not available.{Colors.RESET}")
 
-    # --- Set initial mode ---
     initial_mode = "webai" if shared_state["webai_available"] else "g4f" if shared_state["g4f_available"] else None
     if not initial_mode:
         print("\nERROR:    No server modes are available to run. Exiting.")
         controller_process.terminate()
         sys.exit(1)
 
-    # --- Main Server-Switching Loop ---
     current_process = None
     stop_event = None
 
@@ -230,7 +256,6 @@ if __name__ == "__main__":
         while True:
             requested = shared_state["requested_mode"]
             if not current_process or (requested and requested != shared_state["current_mode"]):
-
                 if current_process and current_process.is_alive():
                     print(f"\n[Controller] Gracefully stopping server ('{shared_state['current_mode']}')...")
                     if stop_event:
@@ -240,10 +265,9 @@ if __name__ == "__main__":
                         print("[Controller] Process did not stop in time, terminating.")
                         current_process.terminate()
 
-                # Update the state
                 current_mode = requested or initial_mode
                 shared_state["current_mode"] = current_mode
-                shared_state["requested_mode"] = None  # Reset the request
+                shared_state["requested_mode"] = None
 
                 print(f"\n[Controller] Starting server in '{current_mode}' mode on port {args.port}...")
                 stop_event = multiprocessing.Event()
@@ -251,7 +275,7 @@ if __name__ == "__main__":
                 if current_mode == "webai":
                     process_args = (args.host, args.port, args.reload, stop_event)
                     target_func = start_webai_server
-                else: # g4f
+                else:
                     process_args = (args.host, args.port, stop_event)
                     target_func = start_g4f_server
 
@@ -264,7 +288,6 @@ if __name__ == "__main__":
         print("\n[Controller] Ctrl+C detected. Initiating final shutdown...")
 
     finally:
-        # Final cleanup
         if stop_event and not stop_event.is_set():
             stop_event.set()
 
