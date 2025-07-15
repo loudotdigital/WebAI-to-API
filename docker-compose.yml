@@ -16,7 +16,6 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - ENVIRONMENT=${ENVIRONMENT:-production}
-      - API_KEY=You-API-KEY
     command: >
       sh -c "
         python src/run.py;
