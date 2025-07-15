@@ -110,22 +110,22 @@ def start_g4f_server_protected(host: str, port: int, stop_event: "Multiprocessin
     """
     Loads the g4f app using its factory, wraps it in our security middleware, and then runs it.
     """
-    # This import must be inside the function.
-    # We import the FACTORY function, not an app object.
     from g4f.api import create_app
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
-    # Call the factory to get the actual FastAPI app instance
     g4f_app = create_app()
 
     # --- Security Middleware for G4F ---
     class ApiKeyMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
+            # Allow OPTIONS preflight requests to pass without a key
+            if request.method == "OPTIONS":
+                return await call_next(request)
+
             api_key = os.getenv("API_KEY")
-            # If no API key is configured on the server, block all requests
             if not api_key:
                 return JSONResponse(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -149,7 +149,6 @@ def start_g4f_server_protected(host: str, port: int, stop_event: "Multiprocessin
                     content={"detail": "Invalid or malformed API Key"},
                 )
             
-            # If the key is valid, proceed with the request
             response = await call_next(request)
             return response
 
@@ -170,7 +169,6 @@ def start_g4f_server_protected(host: str, port: int, stop_event: "Multiprocessin
     monitor_thread.start()
 
     print_server_info(host, port, "g4f")
-    # Run the modified g4f_app with uvicorn
     uvicorn.run(g4f_app, host=host, port=port, log_level="info")
 
 
