@@ -4,70 +4,52 @@
     <meta charset="UTF-8">
     <title>Server Controller</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f4f9; }
-        .controller { text-align: center; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { margin-top: 0; }
-        .mode { border: 1px solid #ddd; padding: 1rem; margin-top: 1rem; border-radius: 5px; }
-        .running { border-color: #28a745; background-color: #e9f7ea; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 10px; }
-        button:hover { background-color: #0056b3; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        body { font-family: sans-serif; padding: 2em; }
+        .status { padding: 1em; border-radius: 5px; margin-bottom: 1em; }
+        .running { background-color: #d4edda; border: 1px solid #c3e6cb; }
+        .stopped { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+        button { padding: 0.5em 1em; font-size: 1em; cursor: pointer; }
     </style>
 </head>
 <body>
-    <div class="controller">
-        <h1>Server Mode Controller</h1>
-        <div id="status-container"><p>Loading...</p></div>
+    <h1>WebAI-to-API Server Controller</h1>
+    
+    <div id="status-container">
+        <!-- Status will be loaded here by JavaScript -->
+        <p>Loading status...</p>
     </div>
 
     <script>
-        const container = document.getElementById('status-container');
-
         async function fetchStatus() {
-            try {
-                const response = await fetch('/status');
-                const data = await response.json();
-                render(data);
-            } catch (error) {
-                container.innerHTML = '<p>Error connecting to the controller. Is it running?</p>';
-            }
+            const response = await fetch('/controller/status');
+            const data = await response.json();
+            
+            const container = document.getElementById('status-container');
+            container.innerHTML = `
+                <div class="status ${data.current_mode === 'webai' ? 'running' : 'stopped'}">
+                    <strong>WebAI Server (Primary)</strong>: ${data.current_mode === 'webai' ? 'RUNNING' : 'STOPPED'}
+                    <p>Available: ${data.webai_available ? '✅ Yes' : '❌ No'}</p>
+                    ${data.current_mode !== 'webai' && data.webai_available ? '<button onclick="switchServer(\'webai\')">Start WebAI Server</button>' : ''}
+                </div>
+                <div class="status ${data.current_mode === 'g4f' ? 'running' : 'stopped'}">
+                    <strong>g4f Server (Fallback)</strong>: ${data.current_mode === 'g4f' ? 'RUNNING' : 'STOPPED'}
+                    <p>Available: ${data.g4f_available ? '✅ Yes' : '❌ No'}</p>
+                    ${data.current_mode !== 'g4f' && data.g4f_available ? '<button onclick="switchServer(\'g4f\')">Start g4f Server</button>' : ''}
+                </div>
+            `;
         }
 
         async function switchServer(mode) {
-            container.innerHTML = `<p>Switching to ${mode} mode...</p>`;
-            await fetch(`/switch/${mode}`, { method: 'POST' });
-            setTimeout(fetchStatus, 2000); // Wait 2s for server to restart, then refresh
+            await fetch(`/controller/switch/${mode}`, { method: 'POST' });
+            // After sending the switch command, refresh the status after a short delay
+            setTimeout(fetchStatus, 2000); // 2-second delay to allow server to restart
         }
 
-        function render(data) {
-            let html = '';
-            
-            // WebAI Server
-            html += `
-                <div class="mode ${data.current_mode === 'webai' ? 'running' : ''}">
-                    <h3>WebAI Server (Gemini)</h3>
-                    <p>Status: <strong>${data.current_mode === 'webai' ? 'RUNNING' : 'STOPPED'}</strong></p>
-                    <button onclick="switchServer('webai')" ${data.current_mode === 'webai' || !data.webai_available ? 'disabled' : ''}>
-                        Activate WebAI
-                    </button>
-                </div>
-            `;
-            
-            // g4f Server
-            html += `
-                <div class="mode ${data.current_mode === 'g4f' ? 'running' : ''}">
-                    <h3>g4f Server (Fallback)</h3>
-                    <p>Status: <strong>${data.current_mode === 'g4f' ? 'RUNNING' : 'STOPPED'}</strong></p>
-                    <button onclick="switchServer('g4f')" ${data.current_mode === 'g4f' || !data.g4f_available ? 'disabled' : ''}>
-                        Activate g4f
-                    </button>
-                </div>
-            `;
-            
-            container.innerHTML = html;
-        }
-
-        document.addEventListener('DOMContentLoaded', fetchStatus);
+        // Fetch status on page load and then every 5 seconds
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchStatus();
+            setInterval(fetchStatus, 5000);
+        });
     </script>
 </body>
 </html>
