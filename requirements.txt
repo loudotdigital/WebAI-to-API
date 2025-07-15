@@ -31,3 +31,9 @@ typing-extensions==4.12.2 ; python_version >= "3.10" and python_version < "4.0"
 uvicorn==0.34.0 ; python_version >= "3.10" and python_version < "4.0"
 win32-setctime==1.2.0 ; python_version >= "3.10" and python_version < "4.0" and sys_platform == "win32"
 wmi==1.5.1 ; python_version >= "3.10" and python_version < "4.0" and platform_system == "Windows"
+
+# ADD THESE LINES
+g4f==0.5.5.6
+aiohttp-socks==0.10.1
+nodriver==0.46.1
+platformdirs==4.3.8

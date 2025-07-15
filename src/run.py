@@ -1,18 +1,16 @@
 # src/run.py
 import argparse
 import asyncio
-import uvicorn
 import multiprocessing
 import time
 import sys
 import threading
 import os
 import signal
-from typing import Dict, Union, Tuple
-from fastapi.routing import APIRoute
-from typing import TYPE_CHECKING
+from typing import Dict, Tuple
 
 # This block is only processed by type checkers like Pylance
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Event as MultiprocessingEvent
 
@@ -34,16 +32,19 @@ from app.services.gemini_client import init_gemini_client
 # Conditionally import g4f runner function
 try:
     from g4f.api import run_api as run_g4f_api
-
     G4F_AVAILABLE = True
 except ImportError:
     G4F_AVAILABLE = False
+
+# --- NEW: FastAPI imports for the controller ---
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+import uvicorn
 
 
 # Helper class for terminal colors
 class Colors:
     """A class to hold ANSI color codes for terminal output."""
-
     YELLOW = "\033[93m"
     CYAN = "\033[96m"
     MAGENTA = "\033[95m"
@@ -69,8 +70,6 @@ def get_app_info() -> Tuple[str, str]:
 
 
 # --- UNIFIED Server Runner Functions ---
-
-
 def start_webai_server(
     host: str, port: int, reload: bool, stop_event: "MultiprocessingEvent"
 ):
@@ -114,20 +113,6 @@ def start_g4f_server(host: str, port: int, stop_event: "MultiprocessingEvent"):
     run_g4f_api(host=host, port=port, proxy=None)
 
 
-# --- Standard Input Listener ---
-def input_listener(shared_state: Dict):
-    """Listens for user input in a separate thread to avoid blocking."""
-    while True:
-        try:
-            choice = input()
-            if choice == "1":
-                shared_state["requested_mode"] = "webai"
-            elif choice == "2":
-                shared_state["requested_mode"] = "g4f"
-        except (EOFError, KeyboardInterrupt):
-            break
-
-
 # --- Helper Function for Printing Info ---
 def print_server_info(host: str, port: int, mode: str):
     """Displays complete, formatted information about the running server."""
@@ -139,156 +124,128 @@ def print_server_info(host: str, port: int, mode: str):
     print(f"{Colors.BOLD}{Colors.YELLOW}{app_info_line}{Colors.RESET}")
     if mode == "webai":
         print("🚀 WebAI-to-API Server is RUNNING (Primary Mode) 🚀".center(80))
-        print("=" * 80)
-        print("\n✨ Available Services:")
-        print(f"  - Docs (Swagger): {base_url}/docs")
-        print("\n⚙️ Config.conf:")
-        try:
-            CONFIG = load_config()
-            print(f"  - Browser: {CONFIG['Browser']['name']}")
-            print(f"  - Model: {CONFIG['AI']['default_model_gemini']}")
-        except Exception:
-            print("  - Could not load config details.")
-        print("\n🔗 API Endpoints:")
-        paths = sorted(
-            list(
-                set(
-                    route.path
-                    for route in webai_app.routes
-                    if isinstance(route, APIRoute)
-                )
-            )
-        )
-        for path in paths:
-            if path.startswith("/") and path not in [
-                "/docs",
-                "/redoc",
-                "/openapi.json",
-            ]:
-                print(f"  - {base_url}{path}")
     elif mode == "g4f":
         print("🚀 gpt4free Server is RUNNING 🚀".center(80))
-        print("=" * 80)
-        g4f_base_url = f"{base_url}/v1"
-        print("\n✨ gpt4free Service Info:")
-        print(f"  - Base URL: {g4f_base_url}")
-        print(f"  - Docs (Swagger): {base_url}/docs")
-        print("\n🔍 API Discovery Endpoints:")
-        print(f"  - Models   : {g4f_base_url}/models")
-        print(f"  - Providers: {g4f_base_url}/providers")
-        print("\n🔗 Main API Endpoints:")
-        print(f"  - Chat Completions: {g4f_base_url}/chat/completions")
-        print(f"  - Image Generation: {g4f_base_url}/images/generate")
-
-        print(
-            f"\n{Colors.BOLD}{Colors.YELLOW}IMPORTANT USAGE NOTES FOR gpt4free MODE:{Colors.RESET}"
-        )
-        print(
-            f"  - {Colors.YELLOW}To avoid {Colors.BOLD}ProviderNotFoundError{Colors.RESET}{Colors.YELLOW}, your client must send a valid provider name (not a model name).{Colors.RESET}"
-        )
-        print(
-            f"    {Colors.YELLOW}Check the list of valid providers at the {Colors.CYAN}/v1/providers{Colors.YELLOW} endpoint.{Colors.RESET}"
-        )
-    print("\n" + "=" * 80)
-    instruction_text = "Press '1' then Enter for WebAI (Faster) | '2' then Enter for gpt4free | Ctrl+C to Quit"
-    colored_instructions = (
-        f"{Colors.BOLD}{Colors.YELLOW}{instruction_text.center(80)}{Colors.RESET}"
-    )
-    print(colored_instructions)
+    print("=" * 80)
+    print(f"INFO: API Server available at: {base_url}")
     print("=" * 80)
 
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    # Fix: Set the asyncio event loop policy for Windows in the main process as well.
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    # This must be the first line inside the main block for multiprocessing on Windows.
     multiprocessing.freeze_support()
 
     manager = multiprocessing.Manager()
-    shared_state = manager.dict({"requested_mode": None})
+    shared_state = manager.dict({
+        "requested_mode": None,
+        "current_mode": None,
+        "webai_available": False,
+        "g4f_available": False,
+    })
 
-    parser = argparse.ArgumentParser(
-        description="Run a managed server with hot-switching capability."
-    )
-    parser.add_argument("--host", type=str, default="localhost", help="Host IP address")
-    parser.add_argument("--port", type=int, default=6969, help="Port number")
-    parser.add_argument(
-        "--reload", action="store_true", help="Enable auto-reloading for WebAI mode"
-    )
+    parser = argparse.ArgumentParser(description="Run a managed server with a web controller.")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host IP address for AI servers")
+    parser.add_argument("--port", type=int, default=6969, help="Port for AI servers")
+    parser.add_argument("--controller-port", type=int, default=7000, help="Port for the web controller")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reloading for WebAI mode")
     args = parser.parse_args()
 
+    # --- Controller FastAPI App ---
+    controller_app = FastAPI()
+
+    @controller_app.get("/controller", response_class=HTMLResponse)
+    async def get_controller_page():
+        try:
+            with open("src/controller.html", "r") as f:
+                return HTMLResponse(content=f.read())
+        except FileNotFoundError:
+            return HTMLResponse(content="<h1>Error: controller.html not found.</h1>", status_code=500)
+
+    @controller_app.get("/controller/status")
+    async def get_status():
+        return dict(shared_state)
+
+    @controller_app.post("/controller/switch/{mode}")
+    async def switch_mode(mode: str):
+        if mode in ["webai", "g4f"]:
+            print(f"[Controller] Web request received to switch to '{mode}' mode.")
+            shared_state["requested_mode"] = mode
+            return {"status": "switching", "mode": mode}
+        return {"status": "error", "message": "Invalid mode"}
+
+    # Function to run the controller app in a separate process
+    def run_controller(host: str, port: int):
+        print("--- Starting Controller UI Server ---")
+        uvicorn.run(controller_app, host=host, port=port, log_level="warning")
+
+    # Start the Controller Server in a separate daemon process
+    controller_process = multiprocessing.Process(
+        target=run_controller, args=(args.host, args.controller_port)
+    )
+    controller_process.daemon = True
+    controller_process.start()
+    time.sleep(2) # Give the controller a moment to start
+    print("\n" + "=" * 80)
+    print(f"🚀 {Colors.BOLD}{Colors.MAGENTA}CONTROLLER UI is running at http://{args.host}:{args.controller_port}/controller{Colors.RESET}")
+    print("=" * 80 + "\n")
+
+    # --- Check availability and update shared state ---
     print("INFO:     Checking availability of server modes...")
-    webai_is_available = asyncio.run(init_gemini_client())
-    if webai_is_available:
-        print(
-            f"INFO:     ✅ {Colors.CYAN}WebAI-to-API mode is available{Colors.RESET} (Gemini client initialized)."
-        )
-    else:
-        print(
-            f"WARN:     ⚠️ {Colors.YELLOW}WebAI-to-API mode is not available{Colors.RESET} (Could not initialize Gemini client)."
-        )
-    if G4F_AVAILABLE:
-        print(
-            f"INFO:     ✅ {Colors.CYAN}gpt4free mode is available{Colors.RESET} ('g4f' library is installed)."
-        )
-    else:
-        print(
-            f"WARN:     ⚠️ {Colors.YELLOW}gpt4free mode is not available{Colors.RESET} ('g4f' library not found)."
-        )
+    shared_state["webai_available"] = asyncio.run(init_gemini_client())
+    shared_state["g4f_available"] = G4F_AVAILABLE
 
-    # --- Set initial mode based on OS ---
-    initial_mode = "webai" if webai_is_available else "g4f" if G4F_AVAILABLE else None
+    if shared_state["webai_available"]:
+        print(f"INFO:     ✅ {Colors.CYAN}WebAI-to-API mode is available.{Colors.RESET}")
+    else:
+        print(f"WARN:     ⚠️ {Colors.YELLOW}WebAI-to-API mode is not available.{Colors.RESET}")
+    if shared_state["g4f_available"]:
+        print(f"INFO:     ✅ {Colors.CYAN}gpt4free mode is available.{Colors.RESET}")
+    else:
+        print(f"WARN:     ⚠️ {Colors.YELLOW}gpt4free mode is not available.{Colors.RESET}")
 
+    # --- Set initial mode ---
+    initial_mode = "webai" if shared_state["webai_available"] else "g4f" if shared_state["g4f_available"] else None
     if not initial_mode:
         print("\nERROR:    No server modes are available to run. Exiting.")
+        controller_process.terminate()
         sys.exit(1)
 
-    # Start background input listener thread
-    input_thread = threading.Thread(
-        target=input_listener, args=(shared_state,), daemon=True
-    )
-    input_thread.start()
-
+    # --- Main Server-Switching Loop ---
     current_process = None
-    current_mode = None
     stop_event = None
 
     try:
-        # Main controller loop
         while True:
             requested = shared_state["requested_mode"]
-            if not current_process or (requested and requested != current_mode):
+            if not current_process or (requested and requested != shared_state["current_mode"]):
 
                 if current_process and current_process.is_alive():
-                    print(
-                        f"\n[Controller] Gracefully stopping server ('{current_mode}')..."
-                    )
-                    if stop_event is not None:
+                    print(f"\n[Controller] Gracefully stopping server ('{shared_state['current_mode']}')...")
+                    if stop_event:
                         stop_event.set()
                     current_process.join(timeout=10)
                     if current_process.is_alive():
                         print("[Controller] Process did not stop in time, terminating.")
                         current_process.terminate()
 
+                # Update the state
                 current_mode = requested or initial_mode
-                shared_state["requested_mode"] = None
+                shared_state["current_mode"] = current_mode
+                shared_state["requested_mode"] = None  # Reset the request
 
-                print(f"\n[Controller] Starting server in '{current_mode}' mode...")
-
+                print(f"\n[Controller] Starting server in '{current_mode}' mode on port {args.port}...")
                 stop_event = multiprocessing.Event()
 
                 if current_mode == "webai":
                     process_args = (args.host, args.port, args.reload, stop_event)
                     target_func = start_webai_server
-                else:
+                else: # g4f
                     process_args = (args.host, args.port, stop_event)
                     target_func = start_g4f_server
 
-                current_process = multiprocessing.Process(
-                    target=target_func, args=process_args
-                )
+                current_process = multiprocessing.Process(target=target_func, args=process_args)
                 current_process.start()
 
             time.sleep(1)
@@ -302,14 +259,14 @@ if __name__ == "__main__":
             stop_event.set()
 
         if current_process and current_process.is_alive():
-            print("[Controller] Waiting for final server process to shut down...")
-            current_process.join(timeout=10)
+            print("[Controller] Waiting for final AI server process to shut down...")
+            current_process.join(timeout=5)
             if current_process.is_alive():
-                print("[Controller] Server did not shut down gracefully, terminating.")
                 current_process.terminate()
-
-        print("[Controller] Shutting down manager process...")
-        manager.shutdown()
+        
+        if controller_process and controller_process.is_alive():
+            print("[Controller] Shutting down controller UI process...")
+            controller_process.terminate()
 
         print("[Controller] Shutdown complete. Forcing exit.")
         os._exit(0)
