@@ -40,6 +40,7 @@ except ImportError:
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
+from dotenv import load_dotenv
 
 
 # Helper class for terminal colors
@@ -131,8 +132,45 @@ def print_server_info(host: str, port: int, mode: str):
     print("=" * 80)
 
 
+# --- Controller App Factory & Runner ---
+def create_controller_app(shared_state: Dict):
+    """Creates the FastAPI controller app, injecting the shared state."""
+    controller_app = FastAPI()
+
+    @controller_app.get("/controller", response_class=HTMLResponse)
+    async def get_controller_page():
+        try:
+            # FIX: Ensure the path is relative to the project root
+            with open("src/controller.html", "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+        except FileNotFoundError:
+            return HTMLResponse(content="<h1>Error: controller.html not found.</h1>", status_code=500)
+
+    @controller_app.get("/controller/status")
+    async def get_status():
+        return dict(shared_state)
+
+    @controller_app.post("/controller/switch/{mode}")
+    async def switch_mode(mode: str):
+        if mode in ["webai", "g4f"]:
+            print(f"[Controller] Web request received to switch to '{mode}' mode.")
+            shared_state["requested_mode"] = mode
+            return {"status": "switching", "mode": mode}
+        return {"status": "error", "message": "Invalid mode"}
+
+    return controller_app
+
+def run_controller(host: str, port: int, shared_state: Dict):
+    """Runs the controller app in a separate process."""
+    # This function is now at the top level, so it can be pickled.
+    controller_app = create_controller_app(shared_state)
+    print("--- Starting Controller UI Server ---")
+    uvicorn.run(controller_app, host=host, port=port, log_level="warning")
+
+
 # --- Main Execution Block ---
 if __name__ == "__main__":
+    load_dotenv()
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     multiprocessing.freeze_support()
@@ -152,37 +190,9 @@ if __name__ == "__main__":
     parser.add_argument("--reload", action="store_true", help="Enable auto-reloading for WebAI mode")
     args = parser.parse_args()
 
-    # --- Controller FastAPI App ---
-    controller_app = FastAPI()
-
-    @controller_app.get("/controller", response_class=HTMLResponse)
-    async def get_controller_page():
-        try:
-            with open("src/controller.html", "r") as f:
-                return HTMLResponse(content=f.read())
-        except FileNotFoundError:
-            return HTMLResponse(content="<h1>Error: controller.html not found.</h1>", status_code=500)
-
-    @controller_app.get("/controller/status")
-    async def get_status():
-        return dict(shared_state)
-
-    @controller_app.post("/controller/switch/{mode}")
-    async def switch_mode(mode: str):
-        if mode in ["webai", "g4f"]:
-            print(f"[Controller] Web request received to switch to '{mode}' mode.")
-            shared_state["requested_mode"] = mode
-            return {"status": "switching", "mode": mode}
-        return {"status": "error", "message": "Invalid mode"}
-
-    # Function to run the controller app in a separate process
-    def run_controller(host: str, port: int):
-        print("--- Starting Controller UI Server ---")
-        uvicorn.run(controller_app, host=host, port=port, log_level="warning")
-
     # Start the Controller Server in a separate daemon process
     controller_process = multiprocessing.Process(
-        target=run_controller, args=(args.host, args.controller_port)
+        target=run_controller, args=(args.host, args.controller_port, shared_state)
     )
     controller_process.daemon = True
     controller_process.start()
